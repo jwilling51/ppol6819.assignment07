@@ -14,6 +14,7 @@ execute:
 library(tidyverse)
 library(tidymodels)
 library(corrr)
+library(doParallel)
 
 setwd("/Users/JohnnyWilling/Documents/Grad school/Spring 2026/PPOL 6891 Advanced Data Science/Assignments/ppol6819.assignment07")
 
@@ -34,8 +35,6 @@ nreturn_test <- testing(x = nreturn_split)
 ```{r}
 glimpse(nreturn_train)
 colSums(is.na(nreturn_train))
-
-names(nreturn_train)
 
 # Looks like there are a lot of variables that could cause data leakage, will need to drop. And the pct_TEA vars have a lot of missingness
 data_leak_vars <- c("Low_Response_Score", "Self_Response_Rate_ACS_13_17", "pct_Deletes_CEN_2010", "pct_Census_UAA_CEN_2010", "pct_Mailback_Count_CEN_2010",
@@ -71,13 +70,141 @@ nreturn_train |>
   scale_x_discrete(guide = guide_axis(angle = 75)) +
   labs(x = "Variable", y = "Correlation with non-return rate")
 
+# See if rates vary significantly across states
+nreturn_train |>
+  group_by(State_name) |>
+  summarize(non_return_rate = mean(non_return_rate)) |>
+  ggplot(aes(x = reorder(State_name, non_return_rate), y = non_return_rate)) +
+  geom_col() +
+  scale_x_discrete(guide = guide_axis(angle = 75)) +
+  labs(x = "State", y = "Average non-return rate")
+
 ```
 
-## Training Models
-
+## Set up folds
 ```{r}
-
+folds <- vfold_cv(data = nreturn_train, v = 3)
 
 ```
 
+## Training models
+
+### Lasso Regression
+```{r}
+# Some dollar variables are coded as characters, converting to numeric. Outside of recipe to save time during tuning/training
+nreturn_train <- nreturn_train |>
+  mutate(across(all_of(c("Aggregate_HH_INC_ACS_13_17", "Aggr_House_Value_ACS_13_17",
+                       "avg_Agg_HH_INC_ACS_13_17", "avg_Agg_House_Value_ACS_13_17"
+                       )), ~ parse_number(as.character(.))))
+
+# recipe
+lasso_rec <- recipe(formula = non_return_rate ~ ., data = nreturn_train) |>
+  step_select(-c(vars_to_drop)) |> # drop the duplicate/data leak variables
+  step_zv(all_predictors()) |> # drop vars with zero variance
+  add_role(GIDTR, State_name, County_name, new_role = "id") |> 
+  step_rm(has_role("id")) |> # drop ID vars
+  step_impute_median(all_numeric_predictors()) |> # impute median for missing values
+  step_log(Med_HHD_Inc_ACS_13_17, Aggregate_HH_INC_ACS_13_17, 
+           Med_House_Value_ACS_13_17, Aggr_House_Value_ACS_13_17, 
+           avg_Agg_HH_INC_ACS_13_17, avg_Agg_House_Value_ACS_13_17) |> # logging dollar value vars such as income, as they're likely very skewed
+  step_normalize(all_numeric_predictors())
+
+#model
+lasso_mod <- linear_reg(penalty = tune(), mixture = 1) |>
+  set_mode(mode = "regression") |>
+  set_engine(engine = "glmnet")
+
+# tune penalty
+lasso_grid <- grid_regular(penalty(), levels = 20)
+
+# workflow
+lasso_wf <- workflow() |>
+  add_recipe(lasso_rec) |>
+  add_model(lasso_mod)
+
+# results
+lasso_res <- lasso_wf |>
+  tune_grid(resamples = folds,
+            grid = lasso_grid,
+            metrics = metric_set(yardstick::rmse, yardstick::mae))
+
+lasso_res |>
+  collect_metrics()
+
+lasso_res |>
+  autoplot()
+
+# Lowest RMSE with minimal penalty, but I want to train model with higher penalty to see which coefficients will be dropped; will use this info for more computationally costly models
+lambda <- select_by_one_std_err(lasso_res,
+  metric = "rmse", desc(penalty))
+
+final_lasso_wf <- finalize_workflow(lasso_wf, lambda)
+
+final_lasso_fit <- fit(final_lasso_wf, data = nreturn_train)
+
+tidy(final_lasso_fit)
+
+coefs_zero <- tidy(final_lasso_fit) |>
+  filter(estimate == 0) |>
+  pull(term)
+
+coefs_zero
+
+```
+
+### Regression Tree
+```{r}
+# parallelize
+clusters <- makePSOCKcluster(parallel::detectCores() - 2)
+registerDoParallel(clusters)
+
+# recipe
+tree_rec <- recipe(formula = non_return_rate ~ ., data = nreturn_train) |>
+  step_zv(all_predictors()) |> # drop vars with zero variance
+  add_role(GIDTR, State_name, County_name, new_role = "id") |> 
+  step_rm(has_role("id")) |> # drop ID vars
+  step_impute_median(all_numeric_predictors()) |> # impute median for missing values
+  step_log(Aggregate_HH_INC_ACS_13_17, Med_House_Value_ACS_13_17, 
+           avg_Agg_House_Value_ACS_13_17) |> # removed some of the vars to be logged as they're in coefs_zero and will be dropped
+  step_select(-all_of(c(vars_to_drop, coefs_zero))) # drop the duplicate/data leak variables and those that lasso reduced to zero
+
+system.time({
+  prep(tree_rec) |> bake(new_data = nreturn_train)
+})
+
+# model
+tree_mod <- decision_tree(cost_complexity = tune(),
+    tree_depth = tune(), min_n = tune()) |>
+  set_engine(engine = "rpart") |>
+  set_mode(mode = "regression")
+
+# tune hyperparameters
+tree_grid <- grid_max_entropy(
+  cost_complexity(range = c(-5, -1)),
+  tree_depth(),
+  min_n(),
+  size = 30
+)
+
+# workflow
+tree_wf <- workflow() |>
+  add_recipe(tree_rec) |>
+  add_model(tree_mod)
+
+# results
+tree_res <- tree_wf |>
+  tune_grid(resamples = folds,
+            grid = tree_grid,
+            metrics = metric_set(yardstick::rmse, yardstick::mae))
+
+tree_res |>
+  collect_metrics()
+
+tree_res |>
+  show_best()
+
+tree_res |>
+  autoplot()
+
+```
 
