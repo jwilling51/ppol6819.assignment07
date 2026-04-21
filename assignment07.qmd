@@ -1,0 +1,83 @@
+---
+title: "Assignment 07"
+author: "Johnny Willing"
+format: html
+embed-resources: true
+execute: 
+  warning: false
+  message: false
+---
+
+## Set up
+
+```{r}
+library(tidyverse)
+library(tidymodels)
+library(corrr)
+
+setwd("/Users/JohnnyWilling/Documents/Grad school/Spring 2026/PPOL 6891 Advanced Data Science/Assignments/ppol6819.assignment07")
+
+non_return <- read_csv("data/assignment_modeling.csv")
+
+# Training/testing split
+set.seed(20260420)
+
+nreturn_split <- initial_split(data = non_return, prop = 0.8)
+
+nreturn_train <- training(x = nreturn_split)
+
+nreturn_test <- testing(x = nreturn_split)
+```
+
+## Exploratory Data Analysis
+
+```{r}
+glimpse(nreturn_train)
+colSums(is.na(nreturn_train))
+
+names(nreturn_train)
+
+# Looks like there are a lot of variables that could cause data leakage, will need to drop. And the pct_TEA vars have a lot of missingness
+data_leak_vars <- c("Low_Response_Score", "Self_Response_Rate_ACS_13_17", "pct_Deletes_CEN_2010", "pct_Census_UAA_CEN_2010", "pct_Mailback_Count_CEN_2010",
+                    "pct_TEA_MailOutMailBack_CEN_2010", "pct_TEA_Update_Leave_CEN_2010", "pct_Vacants_CEN_2010")
+
+# There are also a lot of duplicated variables - reporting the exact same thing, just as percentage vs count or from decennial census vs ACS
+# Keeping percents and drop any variable for which there exists another variable that has the same name, plus the prefix "pct_"
+# Keeping ACS data since it's more recent, and dropping decennial census duplicates
+varnames <- names(nreturn_train)
+pct_vars <- varnames[str_detect(varnames, "^pct_")]
+nonpct_vars <- str_remove(pct_vars, "^pct_")
+acs_vars <- varnames[str_detect(varnames, "ACS_13_17$")]
+cen_dup_vars <- str_c(str_remove(acs_vars, "ACS_13_17$"), "CEN_2010")
+dup_vars <- varnames[varnames %in% c(nonpct_vars, cen_dup_vars)]
+
+vars_to_drop <- c(data_leak_vars, dup_vars)
+
+# Get a sense of distribution of non-return rate
+nreturn_train |>
+  ggplot(aes(x = non_return_rate)) +
+  geom_histogram()
+
+# Check correlations between non-return rate and other vars
+nreturn_train |>
+  select(-c(vars_to_drop)) |>
+  select(where(is.numeric)) |>
+  correlate() |>
+  focus(non_return_rate) |>
+  arrange(desc(abs(non_return_rate))) |>
+  head(30) |>
+  ggplot(aes(x = term, y = non_return_rate)) +
+  geom_col() +
+  scale_x_discrete(guide = guide_axis(angle = 75)) +
+  labs(x = "Variable", y = "Correlation with non-return rate")
+
+```
+
+## Training Models
+
+```{r}
+
+
+```
+
+
