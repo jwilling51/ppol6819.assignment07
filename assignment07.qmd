@@ -97,7 +97,7 @@ plan(multisession, workers = parallel::detectCores() - 2)
 
 # recipe
 lasso_rec <- recipe(formula = non_return_rate ~ ., data = nreturn_train) |>
-  step_rm(all_of(vars_to_drop)) |> # drop the duplicate/data leak variables
+  step_rm(!!vars_to_drop) |> # drop the duplicate/data leak variables
   step_zv(all_predictors()) |> # drop vars with zero variance
   add_role(GIDTR, County_name, new_role = "id") |> 
   step_rm(has_role("id")) |> # drop ID vars
@@ -149,7 +149,7 @@ tree_rec <- recipe(formula = non_return_rate ~ ., data = nreturn_train) |>
   step_log(Med_HHD_Inc_ACS_13_17, Aggregate_HH_INC_ACS_13_17, 
            Med_House_Value_ACS_13_17, Aggr_House_Value_ACS_13_17, 
            avg_Agg_HH_INC_ACS_13_17, avg_Agg_House_Value_ACS_13_17) |> # logging dollar value vars such as income, as they're likely very skewed
-  step_rm(all_of(vars_to_drop)) |> # drop the duplicate/data leak variables
+  step_rm(!!vars_to_drop) |> # drop the duplicate/data leak variables
   step_dummy(all_nominal_predictors())
 
 # model
@@ -199,7 +199,7 @@ rf_rec <- recipe(formula = non_return_rate ~ ., data = nreturn_train) |>
   step_log(Med_HHD_Inc_ACS_13_17, Aggregate_HH_INC_ACS_13_17, 
            Med_House_Value_ACS_13_17, Aggr_House_Value_ACS_13_17, 
            avg_Agg_HH_INC_ACS_13_17, avg_Agg_House_Value_ACS_13_17) |> # logging dollar value vars such as income, as they're likely very skewed
-  step_rm(all_of(vars_to_drop)) |> # drop the duplicate/data leak variables
+  step_rm(!!vars_to_drop) |> # drop the duplicate/data leak variables
   step_corr(all_numeric_predictors(), threshold = 0.9) |> # get rid of highly correlated predictors to save computing time
   step_dummy(all_nominal_predictors())
 
@@ -292,5 +292,7 @@ predictions <- bind_cols(
   predict(final_fit, new_data = nreturn_test)
 ) |>
   select(GIDTR, .pred)
+
+write_csv(predictions, "data/predictions.csv")
 
 ```
