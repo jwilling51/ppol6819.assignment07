@@ -19,16 +19,8 @@ library(future)
 
 setwd("/Users/JohnnyWilling/Documents/Grad school/Spring 2026/PPOL 6891 Advanced Data Science/Assignments/ppol6819.assignment07")
 
-non_return <- read_csv("data/assignment_modeling.csv")
+nreturn_train <- read_csv("data/assignment_modeling.csv")
 
-# Training/testing split
-set.seed(20260420)
-
-nreturn_split <- initial_split(data = non_return, prop = 0.8)
-
-nreturn_train <- training(x = nreturn_split)
-
-nreturn_test <- testing(x = nreturn_split)
 ```
 
 ## Exploratory Data Analysis
@@ -82,11 +74,9 @@ nreturn_train |>
 
 # Some dollar variables are coded as characters, converting to numeric. Outside of recipe to save time during tuning/training
 nreturn_train <- nreturn_train |>
-  mutate(across(
-    c(Aggregate_HH_INC_ACS_13_17, Aggr_House_Value_ACS_13_17,
-      avg_Agg_HH_INC_ACS_13_17, avg_Agg_House_Value_ACS_13_17
-    ), ~ as.numeric(gsub("[\\$,]", "", .))
-  ))
+  mutate(across(c(Aggregate_HH_INC_ACS_13_17, Aggr_House_Value_ACS_13_17,
+      avg_Agg_HH_INC_ACS_13_17, avg_Agg_House_Value_ACS_13_17), 
+      ~ as.numeric(gsub("[\\$,]", "", .))))
 
 
 ```
@@ -98,7 +88,7 @@ folds <- vfold_cv(data = nreturn_train, v = 3)
 
 ```
 
-## Training models
+## Tuning models
 
 ### Lasso Regression
 ```{r}
@@ -107,19 +97,18 @@ plan(multisession, workers = parallel::detectCores() - 2)
 
 # recipe
 lasso_rec <- recipe(formula = non_return_rate ~ ., data = nreturn_train) |>
-  step_select(-vars_to_drop) |> # drop the duplicate/data leak variables
+  step_rm(all_of(vars_to_drop)) |> # drop the duplicate/data leak variables
   step_zv(all_predictors()) |> # drop vars with zero variance
-  add_role(GIDTR, State_name, County_name, new_role = "id") |> 
+  add_role(GIDTR, County_name, new_role = "id") |> 
   step_rm(has_role("id")) |> # drop ID vars
   step_impute_median(all_numeric_predictors()) |> # impute median for missing values
   step_log(Med_HHD_Inc_ACS_13_17, Aggregate_HH_INC_ACS_13_17, 
            Med_House_Value_ACS_13_17, Aggr_House_Value_ACS_13_17, 
            avg_Agg_HH_INC_ACS_13_17, avg_Agg_House_Value_ACS_13_17) |> # logging dollar value vars such as income, as they're likely very skewed
-  step_normalize(all_numeric_predictors())
+  step_normalize(all_numeric_predictors()) |>
+  step_dummy(all_nominal_predictors())
 
-summary(lasso_rec)
-
-#model
+# model
 lasso_mod <- linear_reg(penalty = tune(), mixture = 1) |>
   set_mode(mode = "regression") |>
   set_engine(engine = "glmnet")
@@ -144,19 +133,8 @@ lasso_res |>
 lasso_res |>
   autoplot()
 
-# Lowest RMSE with minimal penalty, but I want to train model with higher penalty to see which coefficients will be dropped; will use this info for more computationally costly models
-lambda <- select_by_one_std_err(lasso_res,
-  metric = "rmse", desc(penalty))
-
-final_lasso_wf <- finalize_workflow(lasso_wf, lambda)
-
-final_lasso_fit <- fit(final_lasso_wf, data = nreturn_train)
-
-tidy(final_lasso_fit)
-
-coefs_zero <- tidy(final_lasso_fit) |>
-  filter(estimate == 0) |>
-  pull(term)
+lasso_res |>
+  show_best()
 
 ```
 
@@ -165,12 +143,14 @@ coefs_zero <- tidy(final_lasso_fit) |>
 # recipe
 tree_rec <- recipe(formula = non_return_rate ~ ., data = nreturn_train) |>
   step_zv(all_predictors()) |> # drop vars with zero variance
-  add_role(GIDTR, State_name, County_name, new_role = "id") |> 
+  add_role(GIDTR, County_name, new_role = "id") |> 
   step_rm(has_role("id")) |> # drop ID vars
   step_impute_median(all_numeric_predictors()) |> # impute median for missing values
-  step_log(Aggregate_HH_INC_ACS_13_17, Med_House_Value_ACS_13_17, 
-           avg_Agg_House_Value_ACS_13_17) |> # removed some of the vars to be logged as they're in coefs_zero and will be dropped
-  step_select(-all_of(!!c(vars_to_drop, coefs_zero))) # drop the duplicate/data leak variables and those that lasso reduced to zero
+  step_log(Med_HHD_Inc_ACS_13_17, Aggregate_HH_INC_ACS_13_17, 
+           Med_House_Value_ACS_13_17, Aggr_House_Value_ACS_13_17, 
+           avg_Agg_HH_INC_ACS_13_17, avg_Agg_House_Value_ACS_13_17) |> # logging dollar value vars such as income, as they're likely very skewed
+  step_rm(all_of(vars_to_drop)) |> # drop the duplicate/data leak variables
+  step_dummy(all_nominal_predictors())
 
 # model
 tree_mod <- decision_tree(cost_complexity = tune(),
@@ -178,12 +158,12 @@ tree_mod <- decision_tree(cost_complexity = tune(),
   set_engine(engine = "rpart") |>
   set_mode(mode = "regression")
 
-# tune hyperparameters
+# tune hyperparameters - cost complexity, tree depth, and minimum node size
 tree_grid <- grid_max_entropy(
   cost_complexity(range = c(-5, -1)),
   tree_depth(),
   min_n(),
-  size = 30
+  size = 40
 )
 
 # workflow
@@ -213,18 +193,21 @@ tree_res |>
 # recipe
 rf_rec <- recipe(formula = non_return_rate ~ ., data = nreturn_train) |>
   step_zv(all_predictors()) |> # drop vars with zero variance
-  add_role(GIDTR, State_name, County_name, new_role = "id") |> 
+  add_role(GIDTR, County_name, new_role = "id") |> 
   step_rm(has_role("id")) |> # drop ID vars
   step_impute_median(all_numeric_predictors()) |> # impute median for missing values
-  step_log(Aggregate_HH_INC_ACS_13_17, Med_House_Value_ACS_13_17, 
-           avg_Agg_House_Value_ACS_13_17) |> # removed some of the vars to be logged as they're in coefs_zero and will be dropped
-  step_select(-all_of(!!c(vars_to_drop, coefs_zero))) # drop the duplicate/data leak variables and those that lasso reduced to zero
+  step_log(Med_HHD_Inc_ACS_13_17, Aggregate_HH_INC_ACS_13_17, 
+           Med_House_Value_ACS_13_17, Aggr_House_Value_ACS_13_17, 
+           avg_Agg_HH_INC_ACS_13_17, avg_Agg_House_Value_ACS_13_17) |> # logging dollar value vars such as income, as they're likely very skewed
+  step_rm(all_of(vars_to_drop)) |> # drop the duplicate/data leak variables
+  step_corr(all_numeric_predictors(), threshold = 0.9) |> # get rid of highly correlated predictors to save computing time
+  step_dummy(all_nominal_predictors())
 
 # model
 rf_mod <- rand_forest(
   mtry = tune(),
   min_n = tune(),
-  trees = 200
+  trees = 100
   ) |>
   set_mode(mode = "regression") |>
   set_engine(
@@ -233,10 +216,10 @@ rf_mod <- rand_forest(
     num.threads = 4
   )
 
-# tune hyperparameters
+# tune hyperparameters - mtry and minimum node size
 rf_grid <- grid_regular(
-  mtry(range = c(1, 15)),
-  min_n(range = c(1, 15)),
+  mtry(range = c(5, 35)),
+  min_n(range = c(5, 30)),
   levels = 5
 )
 
@@ -245,7 +228,9 @@ rf_wf <- workflow() |>
   add_recipe(rf_rec) |>
   add_model(rf_mod)
 
+
 # results
+set.seed(20260420)
 rf_res <- rf_wf |>
   tune_grid(resamples = folds,
             grid = rf_grid,
@@ -262,4 +247,50 @@ rf_res |>
 
 ```
 
+Random forest had better performance than Lasso and a single regression tree; I'll now use this model for the final fit on the entire training dataset. For tuning, I used 100 trees to save time, but I will use 500 for training the final model.
 
+## Training final model on full training set
+```{r}
+# select best parameters from random forest results
+best_rf <- rf_res |>
+  select_best(metric = "rmse")
+
+# create best model from random forest results, updating trees from 100 to 500
+final_mod <- rand_forest(
+  mtry = best_rf$mtry,
+  min_n = best_rf$min_n,
+  trees = 500
+  ) |>
+  set_mode(mode = "regression") |>
+  set_engine(
+    engine = "ranger", 
+    importance = "impurity",
+    num.threads = 4
+  )
+
+# final workflow
+final_wf <- workflow() |>
+  add_recipe(rf_rec) |>
+  add_model(final_mod)
+
+# fit the final model on entire training set
+set.seed(20260420)
+final_fit <- final_wf |>
+  fit(data = nreturn_train)
+
+```
+
+# Generate final predictions
+```{r}
+nreturn_test <- read_csv("data/assignment_implementation.csv") |>
+  mutate(across(c(Aggregate_HH_INC_ACS_13_17, Aggr_House_Value_ACS_13_17,
+      avg_Agg_HH_INC_ACS_13_17, avg_Agg_House_Value_ACS_13_17), 
+      ~ as.numeric(gsub("[\\$,]", "", .)))) # fixing dollar variables are coded as characters
+
+predictions <- bind_cols(
+  nreturn_test,
+  predict(final_fit, new_data = nreturn_test)
+) |>
+  select(GIDTR, .pred)
+
+```
